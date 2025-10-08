@@ -184,14 +184,14 @@ function App() {
     const data = await tokenResponse.json();
     logServerEvent(data, "fetch_session_token_response");
 
-    if (!data.client_secret?.value) {
+    if (!data.value) {
       logClientEvent(data, "error.no_ephemeral_key");
       console.error("No ephemeral key provided by the server");
       setSessionStatus("DISCONNECTED");
       return null;
     }
 
-    return data.client_secret.value;
+    return data.value;
   };
 
   const connectToRealtime = async () => {
@@ -263,12 +263,12 @@ function App() {
     const turnDetection = isPTTActive
       ? null
       : {
-          type: 'server_vad',
-          threshold: 0.9,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 500,
-          create_response: true,
-        };
+        type: 'server_vad',
+        threshold: 0.9,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 500,
+        create_response: true,
+      };
 
     sendEvent({
       type: 'session.update',
