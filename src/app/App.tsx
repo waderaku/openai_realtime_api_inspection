@@ -179,8 +179,8 @@ function App() {
   }, [isPTTActive]);
 
   const fetchEphemeralKey = async (): Promise<string | null> => {
-    logClientEvent({ url: "/session" }, "fetch_session_token_request");
-    const tokenResponse = await fetch("/api/session");
+    logClientEvent({ url: "/token" }, "fetch_session_token_request");
+    const tokenResponse = await fetch("/api/token");
     const data = await tokenResponse.json();
     logServerEvent(data, "fetch_session_token_response");
 
@@ -263,12 +263,12 @@ function App() {
     const turnDetection = isPTTActive
       ? null
       : {
-          type: 'server_vad',
-          threshold: 0.9,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 500,
-          create_response: true,
-        };
+        type: 'server_vad',
+        threshold: 0.9,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 500,
+        create_response: true,
+      };
 
     sendEvent({
       type: 'session.update',
