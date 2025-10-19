@@ -1,41 +1,57 @@
 import { NextResponse } from "next/server";
-import OpenAI from "openai";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const sessionConfig = JSON.stringify({
+  type: "realtime",
+  model: "gpt-realtime",
+  audio: { output: { voice: "marin" } }
+});
 
-export async function GET() {
+export async function POST(req: Request) {
   try {
-    const data = await openai.realtime.clientSecrets.create({
-      session: {
-        type: "realtime",
-        model: "gpt-realtime",
-        output_modalities: ["audio"],
-        audio: {
-          input: {
-            format: { type: "audio/pcm", rate: 24000 },
-            transcription: {
-              model: "gpt-4o-mini-transcribe",
-            },
-          },
-          output: {
-            format: { type: "audio/pcm", rate: 24000 },
-            voice: "marin",
-          },
-        },
+    // read the incoming request body as text (SDP offer from client)
+    const sdpOffer = await req.text();
+
+    if (!sdpOffer) {
+      return NextResponse.json(
+        { error: "SDP offer is required" },
+        { status: 400 }
+      );
+    }
+
+    const fd = new FormData();
+    fd.set("sdp", sdpOffer);
+    fd.set("session", sessionConfig);
+
+    const response = await fetch("https://api.openai.com/v1/realtime/calls", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       },
+      body: fd,
     });
 
-    return NextResponse.json({
-      client_secret: {
-        value: data.value,
-        expires_at: data.expires_at,
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("OpenAI API error:", errorText);
+      return NextResponse.json(
+        { error: "Failed to create session with OpenAI" },
+        { status: response.status }
+      );
+    }
+
+    // Send back the SDP answer we received from the OpenAI REST API
+    const sdpAnswer = await response.text();
+
+    return new NextResponse(sdpAnswer, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/sdp",
       },
-      session: data.session,
     });
   } catch (error) {
-    console.error("Error in /session:", error);
+    console.error("Session creation error:", error);
     return NextResponse.json(
-      { error: "Internal Server Error" },
+      { error: "Failed to create session" },
       { status: 500 }
     );
   }

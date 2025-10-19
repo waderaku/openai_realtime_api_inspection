@@ -63,7 +63,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
       default: {
         logServerEvent(event);
         break;
-      } 
+      }
     }
   }
 
@@ -122,7 +122,9 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
 
       updateStatus('CONNECTING');
 
-      const ek = await getEphemeralKey();
+      // Get ephemeral key for SDK authentication
+      const ephemeralKey = await getEphemeralKey();
+
       const rootAgent = initialAgents[0];
 
       // This lets you use the codec selector in the UI to force narrow-band (8 kHz) codecs to
@@ -135,7 +137,33 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
           audioElement,
           // Set preferred codec before offer creation
           changePeerConnection: async (pc: RTCPeerConnection) => {
+            // Apply codec preferences before creating offer
             applyCodec(pc);
+
+            // Start the session using the Session Description Protocol (SDP)
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            const sdpResponse = await fetch("/api/session", {
+              method: "POST",
+              body: offer.sdp,
+              headers: {
+                "Content-Type": "application/sdp",
+              },
+            });
+
+            if (!sdpResponse.ok) {
+              throw new Error(`Failed to create session: ${sdpResponse.statusText}`);
+            }
+            const sdp = await sdpResponse.text();
+            console.log("fetched sdp");
+
+            const answer: RTCSessionDescriptionInit = {
+              type: "answer",
+              sdp,
+            };
+            await pc.setRemoteDescription(answer);
+
             return pc;
           },
         }),
@@ -158,10 +186,17 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
         context: extraContext ?? {},
       });
 
-      await sessionRef.current.connect({ apiKey: ek });
+      // Connect with ephemeral key for SDK authentication
+      // Note: Actual SDP exchange happens in changePeerConnection above
+      console.log("before connect");
+      await sessionRef.current.connect({
+        apiKey: ephemeralKey,
+      });
+      console.log("after connect");
+
       updateStatus('CONNECTED');
     },
-    [callbacks, updateStatus],
+    [callbacks, updateStatus, applyCodec],
   );
 
   const disconnect = useCallback(() => {
@@ -179,7 +214,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
   const interrupt = useCallback(() => {
     sessionRef.current?.interrupt();
   }, []);
-  
+
   const sendUserText = useCallback((text: string) => {
     assertconnected();
     sessionRef.current!.sendMessage(text);
