@@ -83,15 +83,13 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
     isPlayingRef.current = false;
   }, [playAudioChunk]);
 
-  // WebSocketメッセージハンドラー
+
   const handleWebSocketMessage = useCallback((event: MessageEvent) => {
     try {
       const message = JSON.parse(event.data);
 
-      // サーバーイベントをログ
       logServerEvent(message);
 
-      // イベントタイプ別の処理
       switch (message.type) {
         case 'session.created':
           console.log('Session created:', message.session.id);
@@ -243,7 +241,6 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
     }
   };
 
-  /* ----------------------- message helpers ------------------------- */
 
   const interrupt = useCallback(() => {
     try {
@@ -294,8 +291,6 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
   }, []);
 
   const mute = useCallback((m: boolean) => {
-    // WebSocket実装ではマイク入力の有効/無効を切り替える
-    // 実装が必要な場合は、AudioContextのstreamを制御
     console.log('Mute:', m);
   }, []);
 
