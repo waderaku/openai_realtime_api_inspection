@@ -1,4 +1,11 @@
 import { useCallback, useRef, useState, useEffect } from 'react';
+import {
+  RealtimeSession,
+  RealtimeAgent,
+  OpenAIRealtimeWebRTC,
+} from '@openai/agents/realtime';
+
+import { audioFormatForCodec, applyCodecPreferences } from '../lib/codecUtils';
 import { useEvent } from '../contexts/EventContext';
 import { useHandleSessionHistory } from './useHandleSessionHistory';
 import { SessionStatus } from '../types';
@@ -10,22 +17,18 @@ export interface RealtimeSessionCallbacks {
 
 export interface ConnectOptions {
   getEphemeralKey: () => Promise<string>;
-  initialAgents?: any[];
+  initialAgents: RealtimeAgent[];
   audioElement?: HTMLAudioElement;
   extraContext?: Record<string, any>;
   outputGuardrails?: any[];
 }
 
 export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
-  const wsRef = useRef<WebSocket | null>(null);
-  const audioElementRef = useRef<HTMLAudioElement | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const audioQueueRef = useRef<Int16Array[]>([]);
-  const isPlayingRef = useRef(false);
-
-  const [status, setStatus] = useState<SessionStatus>('DISCONNECTED');
-  const { logClientEvent, logServerEvent } = useEvent();
-  const historyHandlers = useHandleSessionHistory().current;
+  const sessionRef = useRef<RealtimeSession | null>(null);
+  const [status, setStatus] = useState<
+    SessionStatus
+  >('DISCONNECTED');
+  const { logClientEvent } = useEvent();
 
   const updateStatus = useCallback(
     (s: SessionStatus) => {
@@ -33,302 +36,186 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
       callbacks.onConnectionChange?.(s);
       logClientEvent({}, s);
     },
-    [callbacks, logClientEvent],
+    [callbacks],
   );
 
-  // 音声再生用のAudioContextとバッファ処理
-  const playAudioChunk = useCallback(async (pcm16Data: Int16Array) => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-    }
+  const { logServerEvent } = useEvent();
 
-    const audioContext = audioContextRef.current;
+  const historyHandlers = useHandleSessionHistory().current;
 
-    // Int16ArrayをFloat32Arrayに変換
-    const float32Data = new Float32Array(pcm16Data.length);
-    for (let i = 0; i < pcm16Data.length; i++) {
-      float32Data[i] = pcm16Data[i] / 32768.0;
-    }
-
-    // AudioBufferを作成して再生
-    const audioBuffer = audioContext.createBuffer(1, float32Data.length, 24000);
-    audioBuffer.getChannelData(0).set(float32Data);
-
-    const source = audioContext.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(audioContext.destination);
-    source.start();
-
-    // 再生終了を待つ
-    await new Promise<void>((resolve) => {
-      source.onended = () => resolve();
-    });
-  }, []);
-
-  // 音声キューの処理
-  const processAudioQueue = useCallback(async () => {
-    if (isPlayingRef.current || audioQueueRef.current.length === 0) {
-      return;
-    }
-
-    isPlayingRef.current = true;
-
-    while (audioQueueRef.current.length > 0) {
-      const chunk = audioQueueRef.current.shift();
-      if (chunk) {
-        await playAudioChunk(chunk);
+  function handleTransportEvent(event: any) {
+    // Handle additional server events that aren't managed by the session
+    switch (event.type) {
+      case "conversation.item.input_audio_transcription.completed": {
+        historyHandlers.handleTranscriptionCompleted(event);
+        break;
+      }
+      case "response.output_audio_transcript.done":
+      case "response.audio_transcript.done": {
+        historyHandlers.handleTranscriptionCompleted(event);
+        break;
+      }
+      case "response.output_audio_transcript.delta":
+      case "response.audio_transcript.delta": {
+        historyHandlers.handleTranscriptionDelta(event);
+        break;
+      }
+      default: {
+        logServerEvent(event);
+        break;
       }
     }
+  }
 
-    isPlayingRef.current = false;
-  }, [playAudioChunk]);
+  const codecParamRef = useRef<string>(
+    (typeof window !== 'undefined'
+      ? (new URLSearchParams(window.location.search).get('codec') ?? 'opus')
+      : 'opus')
+      .toLowerCase(),
+  );
 
+  // Wrapper to pass current codec param
+  const applyCodec = useCallback(
+    (pc: RTCPeerConnection) => applyCodecPreferences(pc, codecParamRef.current),
+    [],
+  );
 
-  const handleWebSocketMessage = useCallback((event: MessageEvent) => {
-    try {
-      const message = JSON.parse(event.data);
+  const handleAgentHandoff = (item: any) => {
+    const history = item.context.history;
+    const lastMessage = history[history.length - 1];
+    const agentName = lastMessage.name.split("transfer_to_")[1];
+    callbacks.onAgentHandoff?.(agentName);
+  };
 
-      logServerEvent(message);
+  useEffect(() => {
+    if (sessionRef.current) {
+      // Log server errors
+      sessionRef.current.on("error", (...args: any[]) => {
+        logServerEvent({
+          type: "error",
+          message: args[0],
+        });
+      });
 
-      switch (message.type) {
-        case 'session.created':
-          console.log('Session created:', message.session.id);
-          break;
+      // history events
+      sessionRef.current.on("agent_handoff", handleAgentHandoff);
+      sessionRef.current.on("agent_tool_start", historyHandlers.handleAgentToolStart);
+      sessionRef.current.on("agent_tool_end", historyHandlers.handleAgentToolEnd);
+      sessionRef.current.on("history_updated", historyHandlers.handleHistoryUpdated);
+      sessionRef.current.on("history_added", historyHandlers.handleHistoryAdded);
+      sessionRef.current.on("guardrail_tripped", historyHandlers.handleGuardrailTripped);
 
-        case 'response.audio.delta':
-          // Base64デコードしてPCM16データに変換
-          if (message.delta) {
-            const binaryString = atob(message.delta);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-              bytes[i] = binaryString.charCodeAt(i);
-            }
-            const pcm16 = new Int16Array(bytes.buffer);
-            audioQueueRef.current.push(pcm16);
-            processAudioQueue();
-          }
-          break;
-
-        case 'response.audio_transcript.delta':
-          historyHandlers.handleTranscriptionDelta(message);
-          break;
-
-        case 'response.audio_transcript.done':
-          historyHandlers.handleTranscriptionCompleted(message);
-          break;
-
-        case 'conversation.item.input_audio_transcription.completed':
-          historyHandlers.handleTranscriptionCompleted(message);
-          break;
-
-        case 'response.function_call_arguments.done':
-          // Function Call完了
-          console.log('Function call:', message.name, message.arguments);
-          break;
-
-        case 'error':
-          console.error('Server error:', message.error);
-          logServerEvent({
-            type: 'error',
-            message: message.error?.message || 'Unknown error',
-          });
-          break;
-
-        default:
-          // その他のイベントは通常のログ処理
-          break;
-      }
-    } catch (error) {
-      console.error('Error handling WebSocket message:', error);
+      // additional transport events
+      sessionRef.current.on("transport_event", handleTransportEvent);
     }
-  }, [logServerEvent, historyHandlers, processAudioQueue]);
+  }, [sessionRef.current]);
 
   const connect = useCallback(
     async ({
       getEphemeralKey,
+      initialAgents,
       audioElement,
       extraContext,
+      outputGuardrails,
     }: ConnectOptions) => {
-      if (wsRef.current) return; // already connected
+      if (sessionRef.current) return; // already connected
 
       updateStatus('CONNECTING');
 
-      try {
-        // FastAPIサーバーに接続
-        const ws = new WebSocket('ws://localhost:8000/ws');
+      const ek = await getEphemeralKey();
+      const rootAgent = initialAgents[0];
 
-        ws.onopen = () => {
-          console.log('WebSocket connected to FastAPI server');
-          updateStatus('CONNECTED');
-        };
+      // This lets you use the codec selector in the UI to force narrow-band (8 kHz) codecs to
+      //  simulate how the voice agent sounds over a PSTN/SIP phone call.
+      const codecParam = codecParamRef.current;
+      const audioFormat = audioFormatForCodec(codecParam);
 
-        ws.onmessage = handleWebSocketMessage;
-
-        ws.onerror = (error) => {
-          console.error('WebSocket error:', error);
-          updateStatus('DISCONNECTED');
-        };
-
-        ws.onclose = () => {
-          console.log('WebSocket disconnected');
-          updateStatus('DISCONNECTED');
-          wsRef.current = null;
-        };
-
-        wsRef.current = ws;
-        audioElementRef.current = audioElement || null;
-
-        // マイク入力の設定
-        const stream = await navigator.mediaDevices.getUserMedia({
+      sessionRef.current = new RealtimeSession(rootAgent, {
+        transport: new OpenAIRealtimeWebRTC({
+          audioElement,
+          // Set preferred codec before offer creation
+          changePeerConnection: async (pc: RTCPeerConnection) => {
+            applyCodec(pc);
+            return pc;
+          },
+        }),
+        model: 'gpt-realtime',
+        config: {
+          outputModalities: ['audio'],
           audio: {
-            channelCount: 1,
-            sampleRate: 24000,
-          }
+            input: {
+              format: audioFormat,
+              transcription: {
+                model: 'gpt-4o-mini-transcribe',
+              },
+            },
+            output: {
+              format: audioFormat,
+            },
+          },
+        },
+        outputGuardrails: outputGuardrails ?? [],
+        context: extraContext ?? {},
+      });
+
+      await sessionRef.current.connect({ apiKey: ek });
+      const transport = sessionRef.current.transport;
+      if (transport instanceof OpenAIRealtimeWebRTC) {
+        const callId = transport.callId;
+        // http://localhost:8000/monitor/startにcall_idを送信してモニタリングを開始する
+        console.log(callId)
+        fetch("http://localhost:8000/monitor/start", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ call_id: callId }),
         });
-
-        const audioContext = new AudioContext({ sampleRate: 24000 });
-        const source = audioContext.createMediaStreamSource(stream);
-        const processor = audioContext.createScriptProcessor(4096, 1, 1);
-
-        processor.onaudioprocess = (e) => {
-          if (wsRef.current?.readyState === WebSocket.OPEN) {
-            const inputData = e.inputBuffer.getChannelData(0);
-
-            // Float32ArrayをInt16Arrayに変換
-            const pcm16 = new Int16Array(inputData.length);
-            for (let i = 0; i < inputData.length; i++) {
-              const s = Math.max(-1, Math.min(1, inputData[i]));
-              pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-            }
-
-            // Base64エンコードして送信
-            const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
-
-            wsRef.current.send(JSON.stringify({
-              type: 'input_audio_buffer.append',
-              audio: base64,
-            }));
-          }
-        };
-
-        source.connect(processor);
-        processor.connect(audioContext.destination);
-
-      } catch (error) {
-        console.error('Connection error:', error);
-        updateStatus('DISCONNECTED');
       }
+
+      updateStatus('CONNECTED');
     },
-    [updateStatus, handleWebSocketMessage],
+    [callbacks, updateStatus],
   );
 
   const disconnect = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-    audioQueueRef.current = [];
+    sessionRef.current?.close();
+    sessionRef.current = null;
     updateStatus('DISCONNECTED');
   }, [updateStatus]);
 
-  const assertConnected = () => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      throw new Error('WebSocket not connected');
-    }
+  const assertconnected = () => {
+    if (!sessionRef.current) throw new Error('RealtimeSession not connected');
   };
 
+  /* ----------------------- message helpers ------------------------- */
 
   const interrupt = useCallback(() => {
-    try {
-      assertConnected();
-      wsRef.current!.send(JSON.stringify({
-        type: 'response.cancel',
-      }));
-      // 音声キューをクリア
-      audioQueueRef.current = [];
-    } catch (error) {
-      console.error('Error interrupting:', error);
-    }
+    sessionRef.current?.interrupt();
   }, []);
 
   const sendUserText = useCallback((text: string) => {
-    try {
-      assertConnected();
-      wsRef.current!.send(JSON.stringify({
-        type: 'conversation.item.create',
-        item: {
-          type: 'message',
-          role: 'user',
-          content: [
-            {
-              type: 'input_text',
-              text: text,
-            },
-          ],
-        },
-      }));
-
-      // レスポンスをリクエスト
-      wsRef.current!.send(JSON.stringify({
-        type: 'response.create',
-      }));
-    } catch (error) {
-      console.error('Error sending text:', error);
-    }
+    assertconnected();
+    sessionRef.current!.sendMessage(text);
   }, []);
 
   const sendEvent = useCallback((ev: any) => {
-    try {
-      assertConnected();
-      wsRef.current!.send(JSON.stringify(ev));
-    } catch (error) {
-      console.error('Error sending event:', error);
-    }
+    sessionRef.current?.transport.sendEvent(ev);
   }, []);
 
   const mute = useCallback((m: boolean) => {
-    console.log('Mute:', m);
+    sessionRef.current?.mute(m);
   }, []);
 
   const pushToTalkStart = useCallback(() => {
-    try {
-      if (!wsRef.current) return;
-      wsRef.current.send(JSON.stringify({
-        type: 'input_audio_buffer.clear'
-      }));
-    } catch (error) {
-      console.error('Error in pushToTalkStart:', error);
-    }
+    if (!sessionRef.current) return;
+    sessionRef.current.transport.sendEvent({ type: 'input_audio_buffer.clear' } as any);
   }, []);
 
   const pushToTalkStop = useCallback(() => {
-    try {
-      if (!wsRef.current) return;
-      wsRef.current.send(JSON.stringify({
-        type: 'input_audio_buffer.commit'
-      }));
-      wsRef.current.send(JSON.stringify({
-        type: 'response.create'
-      }));
-    } catch (error) {
-      console.error('Error in pushToTalkStop:', error);
-    }
-  }, []);
-
-  // クリーンアップ
-  useEffect(() => {
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-      if (audioContextRef.current) {
-        audioContextRef.current.close();
-      }
-    };
+    if (!sessionRef.current) return;
+    sessionRef.current.transport.sendEvent({ type: 'input_audio_buffer.commit' } as any);
+    sessionRef.current.transport.sendEvent({ type: 'response.create' } as any);
   }, []);
 
   return {

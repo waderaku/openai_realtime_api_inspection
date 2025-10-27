@@ -1,121 +1,117 @@
 """
-WebSocket接続の管理とセッション状態を追跡
+監視セッションの管理とイベント履歴の追跡
 """
 
 import logging
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 
-class SessionManager:
-    """WebSocketセッションを管理するクラス"""
-    
+class MonitorManager:
+    """監視セッションを管理するクラス"""
+
     def __init__(self):
-        self.sessions: Dict[str, SessionInfo] = {}
+        self.sessions: Dict[str, "MonitorSession"] = {}
         self.lock = asyncio.Lock()
-    
-    async def create_session(self, session_id: str) -> "SessionInfo":
-        """新しいセッションを作成"""
+
+    async def create_session(self, call_id: str) -> "MonitorSession":
+        """新しい監視セッションを作成"""
         async with self.lock:
-            if session_id in self.sessions:
-                logger.warning(f"セッション {session_id} は既に存在します")
-                return self.sessions[session_id]
-            
-            session = SessionInfo(session_id)
-            self.sessions[session_id] = session
-            logger.info(f"セッション作成: {session_id}")
+            if call_id in self.sessions:
+                logger.warning(f"監視セッション {call_id} は既に存在します")
+                return self.sessions[call_id]
+
+            session = MonitorSession(call_id)
+            self.sessions[call_id] = session
+            logger.info(f"監視セッション作成: {call_id}")
             return session
-    
-    async def get_session(self, session_id: str) -> Optional["SessionInfo"]:
-        """セッション情報を取得"""
+
+    async def get_session(self, call_id: str) -> Optional["MonitorSession"]:
+        """監視セッション情報を取得"""
         async with self.lock:
-            return self.sessions.get(session_id)
-    
-    async def remove_session(self, session_id: str):
-        """セッションを削除"""
+            return self.sessions.get(call_id)
+
+    async def remove_session(self, call_id: str):
+        """監視セッションを削除"""
         async with self.lock:
-            if session_id in self.sessions:
-                del self.sessions[session_id]
-                logger.info(f"セッション削除: {session_id}")
-    
+            if call_id in self.sessions:
+                del self.sessions[call_id]
+                logger.info(f"監視セッション削除: {call_id}")
+
     async def get_active_sessions_count(self) -> int:
-        """アクティブなセッション数を取得"""
+        """アクティブな監視セッション数を取得"""
         async with self.lock:
-            return len(self.sessions)
+            return sum(1 for s in self.sessions.values() if s.is_monitoring)
+
+    async def get_all_sessions(self) -> List["MonitorSession"]:
+        """すべての監視セッションを取得"""
+        async with self.lock:
+            return list(self.sessions.values())
 
 
-class SessionInfo:
-    """個別のセッション情報を保持するクラス"""
-    
-    def __init__(self, session_id: str):
-        self.session_id = session_id
+class MonitorSession:
+    """個別の監視セッション情報を保持するクラス"""
+
+    def __init__(self, call_id: str):
+        self.call_id = call_id
         self.created_at = datetime.now()
         self.last_activity = datetime.now()
-        
+
+        # イベント履歴
+        self.events: List[Dict[str, Any]] = []
+
         # 統計情報
-        self.messages_sent = 0
-        self.messages_received = 0
-        self.audio_chunks_sent = 0
-        self.audio_chunks_received = 0
-        self.errors = 0
-        
+        self.event_counts: Dict[str, int] = {}
+
         # 状態
-        self.is_connected = False
-        self.is_speaking = False
-        
+        self.is_monitoring = False
+
+        # モニターインスタンス（型ヒントをAnyに変更）
+        self.monitor: Any = None
+
         # メタデータ
         self.metadata: Dict[str, Any] = {}
-    
+
     def update_activity(self):
         """最終アクティビティ時刻を更新"""
         self.last_activity = datetime.now()
-    
-    def increment_messages_sent(self):
-        """送信メッセージ数をインクリメント"""
-        self.messages_sent += 1
+
+    def add_event(self, event: Dict[str, Any]):
+        """イベントを記録"""
+        self.events.append(event)
         self.update_activity()
-    
-    def increment_messages_received(self):
-        """受信メッセージ数をインクリメント"""
-        self.messages_received += 1
-        self.update_activity()
-    
-    def increment_audio_sent(self):
-        """送信音声チャンク数をインクリメント"""
-        self.audio_chunks_sent += 1
-        self.update_activity()
-    
-    def increment_audio_received(self):
-        """受信音声チャンク数をインクリメント"""
-        self.audio_chunks_received += 1
-        self.update_activity()
-    
-    def increment_errors(self):
-        """エラー数をインクリメント"""
-        self.errors += 1
-    
+
+        # イベントタイプごとのカウント
+        event_type = event.get("type", "unknown")
+        self.event_counts[event_type] = self.event_counts.get(event_type, 0) + 1
+
+    def get_events(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """最新のイベントを取得"""
+        return self.events[-limit:]
+
     def get_stats(self) -> Dict[str, Any]:
         """統計情報を取得"""
+        duration = (datetime.now() - self.created_at).total_seconds()
+
         return {
-            "session_id": self.session_id,
+            "call_id": self.call_id,
             "created_at": self.created_at.isoformat(),
             "last_activity": self.last_activity.isoformat(),
-            "duration_seconds": (datetime.now() - self.created_at).total_seconds(),
-            "messages_sent": self.messages_sent,
-            "messages_received": self.messages_received,
-            "audio_chunks_sent": self.audio_chunks_sent,
-            "audio_chunks_received": self.audio_chunks_received,
-            "errors": self.errors,
-            "is_connected": self.is_connected,
-            "is_speaking": self.is_speaking,
+            "duration_seconds": duration,
+            "is_monitoring": self.is_monitoring,
+            "total_events": len(self.events),
+            "event_counts": self.event_counts,
+            "events_per_minute": (
+                (len(self.events) / duration * 60) if duration > 0 else 0
+            ),
         }
-    
+
     def __repr__(self):
-        return f"SessionInfo(id={self.session_id}, connected={self.is_connected})"
+        return f"MonitorSession(call_id={self.call_id}, monitoring={self.is_monitoring}, events={len(self.events)})"
 
 
-# グローバルなセッションマネージャー
-session_manager = SessionManager()
+# グローバルな監視マネージャー
+monitor_manager = MonitorManager()

@@ -1,34 +1,28 @@
-"""
-FastAPI WebSocket server for OpenAI Realtime API
-このサーバーはクライアントとOpenAI Realtime APIの間のプロキシとして機能します
-"""
+# coding: utf-8
+"""FastAPI monitoring server for OpenAI Realtime API"""
 
 import os
 import json
 import asyncio
 import logging
-import base64
-import uuid
 from typing import Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from datetime import datetime
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from dotenv import load_dotenv
 import websockets
-from websockets.client import WebSocketClientProtocol
 
 from event_handler import RealtimeEventHandler
-from session_manager import session_manager
-from function_tools import get_tool_definitions, execute_function_call
+from session_manager import monitor_manager
 
 load_dotenv()
-
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="OpenAI Realtime WebSocket Proxy")
-
+app = FastAPI(title="OpenAI Realtime Monitoring Server")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,325 +32,219 @@ app.add_middleware(
 )
 
 
-class OpenAIRealtimeConnection:
-    """OpenAI Realtime APIへのWebSocket接続を管理するクラス"""
+class MonitorStartRequest(BaseModel):
+    call_id: str
 
-    def __init__(self, api_key: str, model: str = "gpt-realtime"):
+
+class MonitorStopRequest(BaseModel):
+    call_id: str
+
+
+class OpenAIRealtimeMonitor:
+    def __init__(self, api_key: str, call_id: str):
         self.api_key = api_key
-        self.model = model
-        self.openai_ws: Optional[WebSocketClientProtocol] = None
+        self.call_id = call_id
+        self.openai_ws = None
         self.is_connected = False
+        self.is_monitoring = True
         self.event_handler = RealtimeEventHandler()
 
     async def connect(self):
-        """OpenAI Realtime APIに接続"""
-        url = f"wss://api.openai.com/v1/realtime?model={self.model}"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "OpenAI-Beta": "realtime=v1",
-        }
+        # Connect to a WebSocket for the in-progress call
+        url = f"wss://api.openai.com/v1/realtime?call_id={self.call_id}"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        logger.info(f"Connecting to: {url}")
 
         try:
             self.openai_ws = await websockets.connect(url, extra_headers=headers)
             self.is_connected = True
-            logger.info("OpenAI Realtime APIに接続しました")
+            logger.info(f"Connected to server. (call_id: {self.call_id})")
 
-            await self.send_session_update()
+            # Send session.update event over the WebSocket once connected
+            session_update = {
+                "type": "session.update",
+                "session": {
+                    "type": "realtime",
+                    "instructions": "Monitor this call session",
+                },
+            }
+            await self.openai_ws.send(json.dumps(session_update))
+            logger.info(f"Sent session.update event (call_id: {self.call_id})")
 
+        except websockets.exceptions.InvalidStatusCode as e:
+            logger.error(f"HTTP Status Error (call_id: {self.call_id})")
+            logger.error(f"  Status Code: {e.status_code}")
+            logger.error(f"  Response Headers: {dict(e.headers)}")
+            raise
         except Exception as e:
-            logger.error(f"OpenAI接続エラー: {e}")
+            logger.error(f"Connection error (call_id: {self.call_id})")
+            logger.error(f"  Error Type: {type(e).__name__}")
+            logger.error(f"  Error: {str(e)}")
             raise
 
-    async def send_session_update(self, config: Optional[dict] = None):
-        """セッション設定を更新"""
-        default_config = {
-            "modalities": ["text", "audio"],
-            "instructions": "あなたは親切なアシスタントです。日本語で応答してください。",
-            "voice": "alloy",
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "input_audio_transcription": {"model": "whisper-1"},
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 500,
-            },
-            "temperature": 0.8,
-            "max_response_output_tokens": 4096,
-            "tools": get_tool_definitions(),
-        }
+    async def monitor_events(self):
+        """イベントを監視し続ける（サンプル実装に準拠）"""
+        if not self.openai_ws or not self.is_connected:
+            logger.error("WebSocket not connected")
+            return
 
-        if config:
-            default_config.update(config)
+        logger.info(f"Starting event monitoring for call_id: {self.call_id}")
 
-        session_update = {"type": "session.update", "session": default_config}
+        try:
+            while self.is_monitoring and self.is_connected:
+                try:
+                    # WebSocketからメッセージを受信（タイムアウトなし）
+                    message = await self.openai_ws.recv()
 
-        await self.send(session_update)
-        logger.info("セッション設定を送信しました")
+                    if isinstance(message, str):
+                        event = json.loads(message)
 
-    async def send(self, message: dict):
-        """OpenAI APIにメッセージを送信"""
-        if self.openai_ws and self.is_connected:
-            await self.openai_ws.send(json.dumps(message))
+                        # イベントハンドラーで処理（ログに記録）
+                        processed_event = self.event_handler.handle_event(event)
 
-    async def receive(self):
-        """OpenAI APIからメッセージを受信"""
-        if self.openai_ws and self.is_connected:
-            message = await self.openai_ws.recv()
-            if isinstance(message, str):
-                event = json.loads(message)
-                return self.event_handler.handle_event(event)
-            return message
-        return None
+                        # 監視セッションに記録
+                        monitor_session = await monitor_manager.get_session(
+                            self.call_id
+                        )
+                        if monitor_session:
+                            monitor_session.add_event(processed_event)
+
+                except websockets.exceptions.ConnectionClosed:
+                    logger.info(
+                        f"WebSocket connection closed (call_id: {self.call_id})"
+                    )
+                    break
+                except Exception as e:
+                    logger.error(
+                        f"Error receiving message (call_id: {self.call_id}): {e}"
+                    )
+                    # エラーが発生しても継続
+                    await asyncio.sleep(1)
+
+        except Exception as e:
+            logger.error(f"Fatal monitoring error (call_id: {self.call_id}): {e}")
+        finally:
+            await self.close()
+            logger.info(f"Event monitoring stopped for call_id: {self.call_id}")
 
     async def close(self):
-        """接続を閉じる"""
+        self.is_monitoring = False
         if self.openai_ws:
             await self.openai_ws.close()
             self.is_connected = False
-            logger.info("OpenAI接続を閉じました")
+            logger.info(f"Closed connection (call_id: {self.call_id})")
+
+
+@app.get("/")
+async def root():
+    return {
+        "status": "ok",
+        "service": "OpenAI Realtime Monitoring Server",
+        "version": "2.0.0",
+        "endpoints": {
+            "start": "POST /monitor/start",
+            "stop": "POST /monitor/stop",
+            "events": "GET /monitor/events/{call_id}",
+            "sessions": "GET /monitor/sessions",
+            "health": "GET /health",
+        },
+    }
 
 
 @app.get("/health")
 async def health():
-    active_sessions = await session_manager.get_active_sessions_count()
-    return {"status": "healthy", "active_sessions": active_sessions}
-
-
-@app.get("/stats")
-async def stats():
-    """統計情報エンドポイント"""
-    active_sessions = await session_manager.get_active_sessions_count()
+    count = await monitor_manager.get_active_sessions_count()
     return {
-        "active_sessions": active_sessions,
-        "total_sessions": len(session_manager.sessions),
+        "status": "healthy",
+        "active_monitors": count,
+        "timestamp": datetime.now().isoformat(),
     }
 
 
-async def handle_function_call(
-    message: dict, openai_conn: OpenAIRealtimeConnection, session_id: str
+@app.post("/monitor/start")
+async def start_monitoring(
+    request: MonitorStartRequest, background_tasks: BackgroundTasks
 ):
-    """
-    Function Callイベントを処理
-    関数を実行し、結果をOpenAI APIに返す
-    """
-    try:
-        call_id = message.get("call_id")
-        function_name = message.get("name")
-        arguments_str = message.get("arguments", "{}")
-
-        logger.info(f"Function Call: {function_name} (session: {session_id})")
-
-        try:
-            arguments = json.loads(arguments_str)
-        except json.JSONDecodeError:
-            logger.error(f"Invalid function arguments: {arguments_str}")
-            arguments = {}
-
-        result = await execute_function_call(function_name, arguments)
-
-        logger.info(f"Function Result: {function_name} -> {result}")
-
-        response_message = {
-            "type": "conversation.item.create",
-            "item": {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": json.dumps(result, ensure_ascii=False),
-            },
-        }
-        await openai_conn.send(response_message)
-
-        create_response = {"type": "response.create"}
-        await openai_conn.send(create_response)
-        logger.info(f"Function Call後のレスポンス生成をリクエストしました")
-
-    except Exception as e:
-        logger.error(f"Function call error: {e}")
-        # エラー時もOpenAI APIに通知
-        error_message = {
-            "type": "conversation.item.create",
-            "item": {
-                "type": "function_call_output",
-                "call_id": message.get("call_id"),
-                "output": json.dumps({"error": str(e)}, ensure_ascii=False),
-            },
-        }
-        await openai_conn.send(error_message)
-
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """
-    クライアントとの間のWebSocket接続を処理
-    クライアントからの音声データをOpenAI APIに転送し、
-    OpenAI APIからのレスポンスをクライアントに転送する
-    """
-    session_id = str(uuid.uuid4())
-    session_info = await session_manager.create_session(session_id)
-
-    await websocket.accept()
-    session_info.is_connected = True
-    logger.info(f"クライアントが接続しました (session: {session_id})")
+    call_id = request.call_id
+    existing = await monitor_manager.get_session(call_id)
+    if existing and existing.is_monitoring:
+        return {"status": "already_monitoring", "call_id": call_id}
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        logger.error("OPENAI_API_KEYが設定されていません")
-        await websocket.send_json({"type": "error", "message": "サーバー設定エラー"})
-        await websocket.close()
-        await session_manager.remove_session(session_id)
-        return
-
-    openai_conn = OpenAIRealtimeConnection(api_key)
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set")
 
     try:
-        await openai_conn.connect()
-
-        await websocket.send_json(
-            {
-                "type": "connection.established",
-                "session_id": session_id,
-                "message": "OpenAI Realtime APIに接続しました",
-            }
-        )
-        session_info.increment_messages_sent()
-
-        async def forward_client_to_openai():
-            """クライアント → OpenAI APIへの転送"""
-            try:
-                while openai_conn.is_connected:
-                    # クライアントからメッセージを受信
-                    data = await websocket.receive()
-
-                    if "text" in data:
-                        # JSONメッセージ
-                        message = json.loads(data["text"])
-                        event_type = message.get("type", "unknown")
-                        logger.debug(f"クライアントから受信: {event_type}")
-
-                        # 特殊なイベント処理
-                        if event_type == "input_audio_buffer.speech_started":
-                            session_info.is_speaking = True
-                        elif event_type == "input_audio_buffer.speech_stopped":
-                            session_info.is_speaking = False
-
-                        # 音声データが含まれているか確認
-                        if (
-                            event_type == "input_audio_buffer.append"
-                            and "audio" in message
-                        ):
-                            # 音声データがある場合はカウント
-                            session_info.increment_audio_sent()
-                            logger.debug(
-                                f"音声データ転送: {len(message['audio'])} chars (base64)"
-                            )
-
-                        await openai_conn.send(message)
-                        session_info.increment_messages_received()
-
-                    elif "bytes" in data:
-                        # バイナリデータ（音声）
-                        audio_data = data["bytes"]
-                        logger.debug(f"音声データ受信: {len(audio_data)} bytes")
-
-                        # 音声データをbase64エンコードしてOpenAI APIに送信
-                        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
-                        audio_message = {
-                            "type": "input_audio_buffer.append",
-                            "audio": audio_base64,
-                        }
-                        await openai_conn.send(audio_message)
-                        session_info.increment_audio_sent()
-
-            except WebSocketDisconnect:
-                logger.info(f"クライアントが切断しました (session: {session_id})")
-            except RuntimeError as e:
-                if "disconnect" in str(e).lower():
-                    logger.info(
-                        f"クライアント接続が閉じられました (session: {session_id})"
-                    )
-                else:
-                    logger.error(f"クライアント→OpenAI転送エラー: {e}")
-                    session_info.increment_errors()
-            except Exception as e:
-                logger.error(f"クライアント→OpenAI転送エラー: {e}")
-                session_info.increment_errors()
-
-        async def forward_openai_to_client():
-            """OpenAI API → クライアントへの転送"""
-            try:
-                while openai_conn.is_connected:
-                    # OpenAI APIからメッセージを受信
-                    message = await openai_conn.receive()
-
-                    if message:
-                        event_type = message.get("type", "unknown")
-                        logger.debug(f"OpenAIから受信: {event_type}")
-
-                        # 音声データの統計
-                        if event_type == "response.audio.delta":
-                            session_info.increment_audio_received()
-
-                        # Function Callイベントの処理
-                        if event_type == "response.function_call_arguments.done":
-                            # まずクライアントにイベントを転送（UI表示用）
-                            try:
-                                await websocket.send_json(message)
-                                session_info.increment_messages_sent()
-                            except RuntimeError:
-                                pass
-                            # その後、サーバー側でFunction Callを実行
-                            await handle_function_call(message, openai_conn, session_id)
-                            continue
-
-                        # クライアントに転送
-                        try:
-                            await websocket.send_json(message)
-                            session_info.increment_messages_sent()
-                        except RuntimeError:
-                            # クライアントが切断済み
-                            logger.info(
-                                f"クライアントが切断済みのためメッセージ送信をスキップ (session: {session_id})"
-                            )
-                            break
-
-            except Exception as e:
-                if "disconnect" not in str(e).lower():
-                    logger.error(f"OpenAI→クライアント転送エラー: {e}")
-                    session_info.increment_errors()
-
-        # 両方向の転送を並行実行
-        await asyncio.gather(
-            forward_client_to_openai(),
-            forward_openai_to_client(),
-            return_exceptions=True,
-        )
-
+        session = await monitor_manager.create_session(call_id)
+        monitor = OpenAIRealtimeMonitor(api_key, call_id)
+        await monitor.connect()
+        session.monitor = monitor
+        session.is_monitoring = True
+        background_tasks.add_task(monitor.monitor_events)
+        logger.info(f"Started monitoring (call_id: {call_id})")
+        return {
+            "status": "monitoring_started",
+            "call_id": call_id,
+            "timestamp": datetime.now().isoformat(),
+        }
     except Exception as e:
-        logger.error(f"WebSocketエラー: {e}")
-        try:
-            await websocket.send_json({"type": "error", "message": str(e)})
-        except:
-            pass
+        await monitor_manager.remove_session(call_id)
+        raise HTTPException(status_code=500, detail=str(e))
 
-    finally:
-        # クリーンアップ
-        session_info.is_connected = False
-        await openai_conn.close()
 
-        # セッション統計をログ出力
-        stats = session_info.get_stats()
-        logger.info(f"セッション終了: {stats}")
+@app.post("/monitor/stop")
+async def stop_monitoring(request: MonitorStopRequest):
+    session = await monitor_manager.get_session(request.call_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.monitor:
+        await session.monitor.close()
+    session.is_monitoring = False
+    return {
+        "status": "stopped",
+        "call_id": request.call_id,
+        "stats": session.get_stats(),
+    }
 
-        try:
-            await websocket.close()
-        except:
-            pass
 
-        # セッションを削除
-        await session_manager.remove_session(session_id)
-        logger.info(f"接続を閉じました (session: {session_id})")
+@app.get("/monitor/events/{call_id}")
+async def get_events(call_id: str, limit: int = 100):
+    session = await monitor_manager.get_session(call_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {
+        "call_id": call_id,
+        "events": session.get_events(limit),
+        "total": len(session.events),
+        "stats": session.get_stats(),
+    }
+
+
+@app.get("/monitor/sessions")
+async def list_sessions():
+    sessions = await monitor_manager.get_all_sessions()
+    return {
+        "sessions": [
+            {
+                "call_id": s.call_id,
+                "is_monitoring": s.is_monitoring,
+                "event_count": len(s.events),
+            }
+            for s in sessions
+        ]
+    }
+
+
+@app.delete("/monitor/session/{call_id}")
+async def delete_session(call_id: str):
+    session = await monitor_manager.get_session(call_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.is_monitoring and session.monitor:
+        await session.monitor.close()
+    await monitor_manager.remove_session(call_id)
+    return {"status": "deleted", "call_id": call_id}
 
 
 if __name__ == "__main__":

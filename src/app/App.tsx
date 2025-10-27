@@ -12,14 +12,28 @@ import BottomToolbar from "./components/BottomToolbar";
 
 // Types
 import { SessionStatus } from "@/app/types";
+import type { RealtimeAgent } from '@openai/agents/realtime';
 
 // Context providers & hooks
 import { useTranscript } from "@/app/contexts/TranscriptContext";
 import { useEvent } from "@/app/contexts/EventContext";
 import { useRealtimeSession } from "./hooks/useRealtimeSession";
+import { createModerationGuardrail } from "@/app/agentConfigs/guardrails";
 
 // Agent configs
 import { allAgentSets, defaultAgentSetKey } from "@/app/agentConfigs";
+import { customerServiceRetailScenario } from "@/app/agentConfigs/customerServiceRetail";
+import { chatSupervisorScenario } from "@/app/agentConfigs/chatSupervisor";
+import { customerServiceRetailCompanyName } from "@/app/agentConfigs/customerServiceRetail";
+import { chatSupervisorCompanyName } from "@/app/agentConfigs/chatSupervisor";
+import { simpleHandoffScenario } from "@/app/agentConfigs/simpleHandoff";
+
+// Map used by connect logic for scenarios defined via the SDK.
+const sdkScenarioMap: Record<string, RealtimeAgent[]> = {
+  simpleHandoff: simpleHandoffScenario,
+  customerServiceRetail: customerServiceRetailScenario,
+  chatSupervisor: chatSupervisorScenario,
+};
 
 import useAudioDownload from "./hooks/useAudioDownload";
 import { useHandleSessionHistory } from "./hooks/useHandleSessionHistory";
@@ -49,9 +63,12 @@ function App() {
   const { logClientEvent, logServerEvent } = useEvent();
 
   const [selectedAgentName, setSelectedAgentName] = useState<string>("");
-  const [selectedAgentConfigSet, setSelectedAgentConfigSet] = useState<any[] | null>(null);
+  const [selectedAgentConfigSet, setSelectedAgentConfigSet] = useState<
+    RealtimeAgent[] | null
+  >(null);
 
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
+  // Ref to identify whether the latest agent switch came from an automatic handoff
   const handoffTriggeredRef = useRef(false);
 
   const sdkAudioElement = React.useMemo(() => {
@@ -110,7 +127,7 @@ function App() {
       sendEvent(eventObj);
       logClientEvent(eventObj, eventNameSuffix);
     } catch (err) {
-      console.error('Failed to send via WebSocket', err);
+      console.error('Failed to send via SDK', err);
     }
   };
 
@@ -128,6 +145,7 @@ function App() {
 
     const agents = allAgentSets[finalAgentConfig];
     const agentKeyToUse = agents[0]?.name || "";
+
     setSelectedAgentName(agentKeyToUse);
     setSelectedAgentConfigSet(agents);
   }, [searchParams]);
@@ -145,10 +163,11 @@ function App() {
       selectedAgentName
     ) {
       const currentAgent = selectedAgentConfigSet.find(
-        (a: any) => a.name === selectedAgentName
+        (a) => a.name === selectedAgentName
       );
       addTranscriptBreadcrumb(`Agent: ${selectedAgentName}`, currentAgent);
       updateSession(!handoffTriggeredRef.current);
+      // Reset flag after handling so subsequent effects behave normally
       handoffTriggeredRef.current = false;
     }
   }, [selectedAgentConfigSet, selectedAgentName, sessionStatus]);
@@ -159,24 +178,59 @@ function App() {
     }
   }, [isPTTActive]);
 
-  const fetchEphemeralKey = async (): Promise<string> => {
-    // WebSocket接続ではエフェメラルキーは不要（FastAPIサーバー側で管理）
-    return "dummy-key";
+  const fetchEphemeralKey = async (): Promise<string | null> => {
+    logClientEvent({ url: "/token" }, "fetch_session_token_request");
+    const tokenResponse = await fetch("/api/token");
+    const data = await tokenResponse.json();
+    logServerEvent(data, "fetch_session_token_response");
+
+    if (!data.client_secret?.value) {
+      logClientEvent(data, "error.no_ephemeral_key");
+      console.error("No ephemeral key provided by the server");
+      setSessionStatus("DISCONNECTED");
+      return null;
+    }
+
+    return data.client_secret.value;
   };
 
   const connectToRealtime = async () => {
-    if (sessionStatus !== "DISCONNECTED") return;
-    setSessionStatus("CONNECTING");
+    const agentSetKey = searchParams.get("agentConfig") || "default";
+    if (sdkScenarioMap[agentSetKey]) {
+      if (sessionStatus !== "DISCONNECTED") return;
+      setSessionStatus("CONNECTING");
 
-    try {
-      // WebSocket経由でFastAPIサーバーに接続
-      await connect({
-        getEphemeralKey: fetchEphemeralKey,
-        audioElement: sdkAudioElement,
-      });
-    } catch (err) {
-      console.error("Error connecting via WebSocket:", err);
-      setSessionStatus("DISCONNECTED");
+      try {
+        const EPHEMERAL_KEY = await fetchEphemeralKey();
+        if (!EPHEMERAL_KEY) return;
+
+        // Ensure the selectedAgentName is first so that it becomes the root
+        const reorderedAgents = [...sdkScenarioMap[agentSetKey]];
+        const idx = reorderedAgents.findIndex((a) => a.name === selectedAgentName);
+        if (idx > 0) {
+          const [agent] = reorderedAgents.splice(idx, 1);
+          reorderedAgents.unshift(agent);
+        }
+
+        const companyName = agentSetKey === 'customerServiceRetail'
+          ? customerServiceRetailCompanyName
+          : chatSupervisorCompanyName;
+        const guardrail = createModerationGuardrail(companyName);
+
+        await connect({
+          getEphemeralKey: async () => EPHEMERAL_KEY,
+          initialAgents: reorderedAgents,
+          audioElement: sdkAudioElement,
+          outputGuardrails: [guardrail],
+          extraContext: {
+            addTranscriptBreadcrumb,
+          },
+        });
+      } catch (err) {
+        console.error("Error connecting via SDK:", err);
+        setSessionStatus("DISCONNECTED");
+      }
+      return;
     }
   };
 
@@ -219,7 +273,12 @@ function App() {
     sendEvent({
       type: 'session.update',
       session: {
-        turn_detection: turnDetection,
+        type: 'realtime',
+        audio: {
+          input: {
+            turn_detection: turnDetection,
+          },
+        },
       },
     });
 
@@ -248,6 +307,7 @@ function App() {
     interrupt();
 
     setIsPTTUserSpeaking(true);
+    mute(false);
     sendClientEvent({ type: 'input_audio_buffer.clear' }, 'clear PTT buffer');
 
     // No placeholder; we'll rely on server transcript once ready.
@@ -260,6 +320,8 @@ function App() {
     setIsPTTUserSpeaking(false);
     sendClientEvent({ type: 'input_audio_buffer.commit' }, 'commit PTT');
     sendClientEvent({ type: 'response.create' }, 'trigger response PTT');
+    sendClientEvent({ type: 'input_audio_buffer.clear' }, 'reset buffer after PTT');
+    mute(true);
   };
 
   const onToggleConnection = () => {
@@ -288,8 +350,6 @@ function App() {
     setSelectedAgentName(newAgentName);
     // connectToRealtime will be triggered by effect watching selectedAgentName
   };
-
-
 
   // Because we need a new connection, refresh the page when codec changes
   const handleCodecChange = (newCodec: string) => {
@@ -331,6 +391,16 @@ function App() {
   }, [isAudioPlaybackEnabled]);
 
   useEffect(() => {
+    if (sessionStatus !== 'CONNECTED') return;
+
+    const shouldMuteMic = isPTTActive
+      ? !isPTTUserSpeaking
+      : !isAudioPlaybackEnabled;
+
+    mute(shouldMuteMic);
+  }, [sessionStatus, isPTTActive, isPTTUserSpeaking, isAudioPlaybackEnabled, mute]);
+
+  useEffect(() => {
     if (audioElementRef.current) {
       if (isAudioPlaybackEnabled) {
         audioElementRef.current.muted = false;
@@ -343,27 +413,7 @@ function App() {
         audioElementRef.current.pause();
       }
     }
-
-    // Toggle server-side audio stream mute so bandwidth is saved when the
-    // user disables playback. 
-    try {
-      mute(!isAudioPlaybackEnabled);
-    } catch (err) {
-      console.warn('Failed to toggle SDK mute', err);
-    }
   }, [isAudioPlaybackEnabled]);
-
-  // Ensure mute state is propagated to transport right after we connect or
-  // whenever the SDK client reference becomes available.
-  useEffect(() => {
-    if (sessionStatus === 'CONNECTED') {
-      try {
-        mute(!isAudioPlaybackEnabled);
-      } catch (err) {
-        console.warn('mute sync after connect failed', err);
-      }
-    }
-  }, [sessionStatus, isAudioPlaybackEnabled]);
 
   useEffect(() => {
     if (sessionStatus === "CONNECTED" && audioElementRef.current?.srcObject) {
@@ -438,7 +488,7 @@ function App() {
                   onChange={handleSelectedAgentChange}
                   className="appearance-none border border-gray-300 rounded-lg text-base px-2 py-1 pr-8 cursor-pointer font-normal focus:outline-none"
                 >
-                  {selectedAgentConfigSet?.map((agent: any) => (
+                  {selectedAgentConfigSet?.map((agent) => (
                     <option key={agent.name} value={agent.name}>
                       {agent.name}
                     </option>
@@ -460,7 +510,6 @@ function App() {
               </div>
             </div>
           )}
-
         </div>
       </div>
 
