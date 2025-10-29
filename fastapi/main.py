@@ -72,7 +72,7 @@ class OpenAIRealtimeConnection:
         default_config = {
             "modalities": ["text", "audio"],
             "instructions": "あなたは親切なアシスタントです。日本語で応答してください。",
-            "voice": "alloy",
+            "voice": "marin",
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
             "input_audio_transcription": {"model": "whisper-1"},
