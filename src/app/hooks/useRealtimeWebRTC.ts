@@ -19,6 +19,7 @@ export function useRealtimeWebRTC(callbacks: RealtimeWebRTCCallbacks = {}) {
     const dataChannelRef = useRef<RTCDataChannel | null>(null);
     const audioElementRef = useRef<HTMLAudioElement | null>(null);
     const localStreamRef = useRef<MediaStream | null>(null);
+    const isResponseInProgressRef = useRef<boolean>(false);
 
     const { logClientEvent, logServerEvent } = useEvent();
     const historyHandlers = useHandleSessionHistory();
@@ -184,10 +185,21 @@ export function useRealtimeWebRTC(callbacks: RealtimeWebRTCCallbacks = {}) {
             return;
         }
 
+        // Prevent sending response.create if one is already in progress
+        if (event.type === 'response.create' && isResponseInProgressRef.current) {
+            console.warn('[WebRTC] Response already in progress, skipping response.create');
+            return;
+        }
+
         try {
             const message = JSON.stringify(event);
             dataChannelRef.current.send(message);
             logClientEvent(event);
+
+            // Track response state
+            if (event.type === 'response.create') {
+                isResponseInProgressRef.current = true;
+            }
         } catch (error) {
             console.error('[WebRTC] Failed to send event:', error);
         }
@@ -225,6 +237,8 @@ export function useRealtimeWebRTC(callbacks: RealtimeWebRTCCallbacks = {}) {
     }, []);
 
     const interrupt = useCallback(() => {
+        // Reset response state when interrupting
+        isResponseInProgressRef.current = false;
         sendEvent({
             type: 'response.cancel',
         });
@@ -293,6 +307,18 @@ export function useRealtimeWebRTC(callbacks: RealtimeWebRTCCallbacks = {}) {
     const handleServerEvent = useCallback((event: any) => {
 
         switch (event.type) {
+            case 'response.created':
+                // Response has started
+                isResponseInProgressRef.current = true;
+                break;
+            case 'response.done':
+                // Response has completed
+                isResponseInProgressRef.current = false;
+                break;
+            case 'response.cancelled':
+                // Response was cancelled
+                isResponseInProgressRef.current = false;
+                break;
             case 'conversation.item.created':
                 console.log('[WebRTC] Conversation item created:', event.item);
                 // Handle as history added
