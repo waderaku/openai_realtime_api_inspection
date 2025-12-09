@@ -154,8 +154,9 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
       updateStatus('CONNECTING');
 
       try {
-        // FastAPIサーバーに接続
-        const ws = new WebSocket('ws://localhost:8000/ws');
+        // FastAPIサーバーに接続（環境変数から取得、デフォルトはlocalhost）
+        const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/ws';
+        const ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
           console.log('WebSocket connected to FastAPI server');

@@ -1,0 +1,28 @@
+{
+  "name": "openai-realtime-cdk",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "cdk": "cdk",
+    "deploy": "cdk deploy",
+    "synth": "cdk synth",
+    "diff": "cdk diff",
+    "destroy": "cdk destroy",
+    "bootstrap": "cdk bootstrap",
+    "logs": "aws logs tail /ecs/openai-realtime-fastapi --follow",
+    "status": "aws ecs describe-services --cluster openai-realtime-cluster --services fastapi-service",
+    "list-tasks": "aws ecs list-tasks --cluster openai-realtime-cluster --service-name fastapi-service"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "aws-cdk": "^2.133.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.133.0",
+    "constructs": "^10.3.0"
+  }
+}
