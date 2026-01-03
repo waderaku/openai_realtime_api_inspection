@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import OpenAI from 'openai';
+import { OpenAIRealtimeWebSocket } from '@openai/agents/realtime';
 import { RealtimeEvent } from '../../domain/events/realtime-event';
 
 type EventCallback = (event: RealtimeEvent) => void;
@@ -21,19 +21,15 @@ export class OpenAIRealtimeGateway {
             return;
         }
 
-        const client = new OpenAI({ apiKey: apiToken });
+        const connection = new OpenAIRealtimeWebSocket();
 
-        // Agents SDK (Realtime) — using the ws helper if available
-        const factory = (client as any).realtime?.connections?.ws ?? (client as any).realtime?.connect;
-        if (!factory) {
-            throw new Error('OpenAI Realtime client is not available in this SDK version.');
-        }
-
-        const connection: RealtimeConn = await factory({
-            model: 'gpt-4o-realtime-preview-2024-12-17',
+        // SDK uses 'connected' event (not 'open')
+        connection.on('connected', () => {
+            this.logger.log(`Connected to OpenAI Realtime (call_id=${callId})`);
         });
 
-        connection.on?.('event', (event: any) => {
+        // SDK uses '*' wildcard for ALL server events (not 'server_event')
+        connection.on('*', (event: any) => {
             try {
                 onEvent({ ...event, call_id: callId });
             } catch (err) {
@@ -41,30 +37,31 @@ export class OpenAIRealtimeGateway {
             }
         });
 
-        connection.on?.('open', async () => {
-            this.logger.log(`Connected to OpenAI Realtime (call_id=${callId})`);
-            try {
-                await connection.send?.({
-                    type: 'session.update',
-                    session: { type: 'realtime', instructions: 'Monitor this call session' },
-                });
-            } catch (err) {
-                this.logger.error(`Failed to send session.update for ${callId}: ${err}`);
-            }
-        });
-
-        connection.on?.('close', (payload: any) => {
-            const reason = typeof payload === 'string' ? payload : JSON.stringify(payload ?? {});
-            this.logger.log(`Realtime connection closed (call_id=${callId}, reason=${reason})`);
+        // SDK uses 'disconnected' event (not 'close')
+        connection.on('disconnected', () => {
+            this.logger.log(`Realtime connection closed (call_id=${callId})`);
             this.connections.delete(callId);
         });
 
-        connection.on?.('error', (err: any) => {
+        // 'error' event for error handling
+        connection.on('error', (err: any) => {
             this.logger.error(`Realtime connection error (call_id=${callId}): ${err}`);
             this.connections.delete(callId);
         });
 
-        this.connections.set(callId, connection);
+        try {
+            // Use callId parameter for sideband connection (attach to existing session)
+            await connection.connect({
+                apiKey: apiToken,
+                model: 'gpt-realtime',
+                callId: callId,
+            });
+        } catch (e) {
+            this.logger.error(`Failed to connect for ${callId}: ${e}`);
+            return;
+        }
+
+        this.connections.set(callId, connection as any);
     }
 
     async stop(callId: string) {
