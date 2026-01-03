@@ -34,6 +34,7 @@ app.add_middleware(
 
 class MonitorStartRequest(BaseModel):
     call_id: str
+    api_token: str
 
 
 class MonitorStopRequest(BaseModel):
@@ -167,17 +168,18 @@ async def start_monitoring(
     request: MonitorStartRequest, background_tasks: BackgroundTasks
 ):
     call_id = request.call_id
+    api_token = request.api_token
+
     existing = await monitor_manager.get_session(call_id)
     if existing and existing.is_monitoring:
         return {"status": "already_monitoring", "call_id": call_id}
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set")
+    if not api_token:
+        raise HTTPException(status_code=400, detail="api_token is required")
 
     try:
         session = await monitor_manager.create_session(call_id)
-        monitor = OpenAIRealtimeMonitor(api_key, call_id)
+        monitor = OpenAIRealtimeMonitor(api_token, call_id)
         await monitor.connect()
         session.monitor = monitor
         session.is_monitoring = True

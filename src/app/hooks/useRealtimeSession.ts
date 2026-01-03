@@ -169,7 +169,7 @@ export function useRealtimeSession(callbacks: RealtimeSessionCallbacks = {}) {
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ call_id: callId }),
+          body: JSON.stringify({ call_id: callId, api_token: ek }),
         });
       }
 
