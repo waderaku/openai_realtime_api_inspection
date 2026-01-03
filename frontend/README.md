@@ -2,6 +2,13 @@
 
 This is a demonstration of more advanced patterns for voice agents, using the OpenAI Realtime API and the OpenAI Agents SDK. 
 
+## Deployment Options
+
+This project can be run locally or deployed to AWS ECS:
+
+- **Local Development**: Follow the setup instructions below
+- **AWS ECS Deployment**: See [AWS ECS Deployment Guide](./cdk/README.md) or [Quick Start](./cdk/QUICKSTART.md)
+
 ## About the OpenAI Agents SDK
 
 This project uses the [OpenAI Agents SDK](https://github.com/openai/openai-agents-js), a toolkit for building, managing, and deploying advanced AI agents. The SDK provides:
