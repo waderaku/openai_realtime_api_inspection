@@ -4,16 +4,10 @@ import { RealtimeEvent } from '../../domain/events/realtime-event';
 
 type EventCallback = (event: RealtimeEvent) => void;
 
-type RealtimeConn = {
-    send?: (payload: any) => void | Promise<void>;
-    close?: () => void | Promise<void>;
-    on?: (event: string, handler: (data: any) => void) => void;
-};
-
 @Injectable()
 export class OpenAIRealtimeGateway {
     private readonly logger = new Logger(OpenAIRealtimeGateway.name);
-    private connections = new Map<string, RealtimeConn>();
+    private connections = new Map<string, OpenAIRealtimeWebSocket>();
 
     async startMonitoring(callId: string, apiToken: string, onEvent: EventCallback) {
         if (this.connections.has(callId)) {
@@ -61,7 +55,72 @@ export class OpenAIRealtimeGateway {
             return;
         }
 
-        this.connections.set(callId, connection as any);
+        this.connections.set(callId, connection);
+    }
+
+    /**
+     * Send an event to the Realtime API via the sideband connection.
+     * Used to inject responses or control the conversation.
+     */
+    sendEvent(callId: string, event: any): boolean {
+        const connection = this.connections.get(callId);
+        if (!connection) {
+            this.logger.warn(`No connection found for call_id=${callId}`);
+            return false;
+        }
+
+        try {
+            connection.sendEvent(event);
+            this.logger.log(`Sent event to Realtime API (call_id=${callId}): ${event.type}`);
+            return true;
+        } catch (err) {
+            this.logger.error(`Failed to send event for ${callId}: ${err}`);
+            return false;
+        }
+    }
+
+    /**
+     * Inject a text response into the conversation.
+     * This creates a conversation item and triggers a response.
+     */
+    injectResponse(callId: string, text: string): boolean {
+        const connection = this.connections.get(callId);
+        if (!connection) {
+            this.logger.warn(`No connection found for call_id=${callId}`);
+            return false;
+        }
+
+        try {
+            // Create a conversation item with the response text
+            connection.sendEvent({
+                type: 'conversation.item.create',
+                item: {
+                    type: 'message',
+                    role: 'assistant',
+                    content: [
+                        {
+                            type: 'input_text',
+                            text: text,
+                        },
+                    ],
+                },
+            });
+
+            // Trigger the model to speak the response
+            connection.sendEvent({
+                type: 'response.create',
+            });
+
+            this.logger.log(`Injected response for call_id=${callId}: ${text.substring(0, 50)}...`);
+            return true;
+        } catch (err) {
+            this.logger.error(`Failed to inject response for ${callId}: ${err}`);
+            return false;
+        }
+    }
+
+    getConnection(callId: string): OpenAIRealtimeWebSocket | undefined {
+        return this.connections.get(callId);
     }
 
     async stop(callId: string) {
@@ -69,7 +128,7 @@ export class OpenAIRealtimeGateway {
         if (!conn) return;
         this.connections.delete(callId);
         try {
-            await conn.close?.();
+            conn.close();
         } catch (err) {
             this.logger.error(`Error closing connection for ${callId}: ${err}`);
         }

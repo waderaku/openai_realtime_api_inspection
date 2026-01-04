@@ -26,7 +26,9 @@ export class RealtimeEventProcessor {
             timestamp: event.timestamp ?? new Date().toISOString(),
         };
 
-        this.logger.log(`Received from WebSocket: ${JSON.stringify(enriched)}`);
+        // Log without large audio data to prevent performance issues
+        const logSafe = this.createLogSafeEvent(enriched);
+        this.logger.log(`Received from WebSocket: ${JSON.stringify(logSafe)}`);
 
         const handler = this.handlers[enriched.type] ?? this.handleUnknown;
         try {
@@ -162,4 +164,38 @@ export class RealtimeEventProcessor {
         this.logger.warn(`[監視] 不明なイベントタイプ: ${eventType}`);
         return event;
     };
+
+    /**
+     * Create a log-safe version of the event by truncating large audio data
+     */
+    private createLogSafeEvent(event: RealtimeEvent): any {
+        const safe = { ...event };
+
+        // Truncate audio data in content arrays
+        if (safe.item?.content && Array.isArray(safe.item.content)) {
+            safe.item = {
+                ...safe.item,
+                content: safe.item.content.map((c: any) => {
+                    if (c.type === 'input_audio' && c.transcript !== undefined) {
+                        return {
+                            type: c.type,
+                            transcript: c.transcript,
+                            audio: '[AUDIO_DATA_TRUNCATED]'
+                        };
+                    }
+                    return c;
+                })
+            };
+        }
+
+        // Truncate direct audio/delta fields
+        if (safe.audio && typeof safe.audio === 'string' && safe.audio.length > 100) {
+            safe.audio = `[AUDIO_DATA_TRUNCATED: ${safe.audio.length} chars]`;
+        }
+        if (safe.delta && typeof safe.delta === 'string' && safe.delta.length > 100) {
+            safe.delta = `[DELTA_TRUNCATED: ${safe.delta.length} chars]`;
+        }
+
+        return safe;
+    }
 }
