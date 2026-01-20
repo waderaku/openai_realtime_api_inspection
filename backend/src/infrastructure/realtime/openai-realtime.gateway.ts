@@ -38,9 +38,12 @@ export class OpenAIRealtimeGateway {
         });
 
         // 'error' event for error handling
+        // Note: Not all errors mean the connection should be closed
+        // Only delete connection on actual connection errors, not API validation errors
         connection.on('error', (err: any) => {
-            this.logger.error(`Realtime connection error (call_id=${callId}): ${err}`);
-            this.connections.delete(callId);
+            this.logger.error(`Realtime connection error (call_id=${callId}): ${JSON.stringify(err)}`);
+            // Don't automatically delete connection - let 'disconnected' event handle that
+            // Some errors are just API validation errors and the connection is still valid
         });
 
         try {
@@ -80,8 +83,11 @@ export class OpenAIRealtimeGateway {
     }
 
     /**
-     * Inject a text response into the conversation.
-     * This creates a conversation item and triggers a response.
+     * Inject a text response into the conversation and have it spoken.
+     * 
+     * We use response.create with instructions to make the model speak the exact text.
+     * Without instructions, response.create generates a NEW response instead of
+     * reading the injected text.
      */
     injectResponse(callId: string, text: string): boolean {
         const connection = this.connections.get(callId);
@@ -91,24 +97,15 @@ export class OpenAIRealtimeGateway {
         }
 
         try {
-            // Create a conversation item with the response text
-            connection.sendEvent({
-                type: 'conversation.item.create',
-                item: {
-                    type: 'message',
-                    role: 'assistant',
-                    content: [
-                        {
-                            type: 'input_text',
-                            text: text,
-                        },
-                    ],
-                },
-            });
+            // Don't use conversation.item.create - it just adds text to history
+            // but response.create ignores it and generates new content.
 
-            // Trigger the model to speak the response
+            // Instead, use response.create with instructions to speak specific text
             connection.sendEvent({
                 type: 'response.create',
+                response: {
+                    instructions: `あなたの回答は次の通りです。この内容を正確に、そのまま読み上げてください。余計な言葉を追加しないでください:\n\n${text}`,
+                },
             });
 
             this.logger.log(`Injected response for call_id=${callId}: ${text.substring(0, 50)}...`);

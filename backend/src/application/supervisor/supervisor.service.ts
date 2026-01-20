@@ -143,7 +143,103 @@ export class SupervisorService {
     }
 
     /**
+     * Process a tool call that was initiated by Realtime API.
+     * This method:
+     * 1. Takes the tool call info from Realtime API (function name + arguments)
+     * 2. Executes the tool
+     * 3. Uses Responses API to generate a natural language response based on the tool result
+     * 
+     * This ensures Realtime API and Responses API work together:
+     * - Realtime API: Decides WHICH tool to call and extracts arguments from user speech
+     * - Responses API: Executes the tool and generates the final response text
+     */
+    async processToolCallFromRealtimeApi(
+        functionName: string,
+        argumentsJson: string,
+        userContext?: string,
+        conversationHistory?: string,
+    ): Promise<string> {
+        this.logger.log(`[Realtime→Responses Integration] Processing tool call: ${functionName}(${argumentsJson})`);
+
+        try {
+            // Step 1: Execute the tool that Realtime API decided to call
+            const args = JSON.parse(argumentsJson || '{}');
+            const toolResult = this.executeToolCall(functionName, args);
+            const toolResultJson = JSON.stringify(toolResult, null, 2);
+
+            this.logger.log(`[Tool Result] ${toolResultJson.substring(0, 200)}...`);
+
+            // Step 2: Use Responses API to generate a natural response based on the tool result
+            // Instead of using function_call input format (which can be tricky),
+            // we provide the tool result as context in a user message
+            const systemPrompt = `${SUPERVISOR_INSTRUCTIONS}
+
+# Current Task
+The user asked a question that required looking up information using the "${functionName}" tool.
+The tool has been executed and returned the following data:
+
+\`\`\`json
+${toolResultJson}
+\`\`\`
+
+Based on this data, provide a helpful and concise response to the user's question.
+Keep the response natural and suitable for voice conversation.`;
+
+            const messages: any[] = [
+                {
+                    type: 'message',
+                    role: 'system',
+                    content: systemPrompt,
+                },
+            ];
+
+            // Add conversation history for context if available
+            if (conversationHistory) {
+                messages.push({
+                    type: 'message',
+                    role: 'user',
+                    content: `Previous conversation:\n${conversationHistory}`,
+                });
+            }
+
+            // Add the user's question/context
+            const userQuestion = userContext || `Please provide information based on the ${functionName} tool result.`;
+            messages.push({
+                type: 'message',
+                role: 'user',
+                content: userQuestion,
+            });
+
+            this.logger.log(`[Responses API] Calling with ${messages.length} messages`);
+
+            // Call Responses API to generate the final response
+            const response = await this.openai.responses.create({
+                model: 'gpt-4.1',
+                input: messages,
+                // Don't include tools here - we just want a text response based on the data we provided
+            });
+
+            // Extract the final text response
+            const textOutput = response.output?.find((item) => item.type === 'message');
+            if (textOutput && textOutput.type === 'message' && textOutput.content) {
+                const textContent = textOutput.content.find((c) => c.type === 'output_text');
+                if (textContent && textContent.type === 'output_text' && textContent.text) {
+                    this.logger.log(`[Generated Response] ${textContent.text.substring(0, 100)}...`);
+                    return textContent.text;
+                }
+            }
+
+            return 'I apologize, but I was unable to generate a response. Please try again.';
+        } catch (error) {
+            this.logger.error(`Failed to process tool call: ${error}`);
+            return 'I apologize, but an error occurred. Please try again.';
+        }
+    }
+
+    /**
      * Generate a response to a user question using the Responses API.
+     * This is the full agent flow where Responses API decides which tools to call.
+     * Use this when Realtime API is NOT involved in tool selection.
      */
     async generateResponse(callId: string, userQuestion: string, conversationHistory?: string): Promise<string> {
         this.logger.log(`Generating response for: ${userQuestion}`);

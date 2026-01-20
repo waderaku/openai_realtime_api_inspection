@@ -1,10 +1,21 @@
 import { Body, Controller, Delete, Get, HttpException, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import { MonitoringService } from '../../application/monitoring/monitoring.service';
+import { SupervisorService } from '../../application/supervisor/supervisor.service';
 import { MonitorStartRequestDto, MonitorStopRequestDto, RealtimeEventDto } from './dto/monitor.dto';
+
+// DTO for tool execution
+interface ExecuteToolRequestDto {
+  function_name: string;
+  arguments: string;
+  user_context?: string;
+}
 
 @Controller('monitor')
 export class MonitorController {
-  constructor(private readonly monitoringService: MonitoringService) { }
+  constructor(
+    private readonly monitoringService: MonitoringService,
+    private readonly supervisorService: SupervisorService,
+  ) { }
 
   @Get('health')
   health() {

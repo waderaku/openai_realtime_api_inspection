@@ -24,6 +24,7 @@ export function useHandleSessionHistory() {
       .map((c) => {
         if (!c || typeof c !== "object") return "";
         if (c.type === "input_text") return c.text ?? "";
+        if (c.type === "output_text") return c.text ?? "";  // サイドバンドからの注入テキスト
         if (c.type === "audio") return c.transcript ?? "";
         return "";
       })
