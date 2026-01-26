@@ -1,144 +1,66 @@
 import { RealtimeAgent, tool } from '@openai/agents/realtime'
+import { z } from 'zod'
 
 /**
- * Backend-processed tools with needsApproval: true
+ * askSupervisor ツール（フロントエンド用ダミー）
+ * 
+ * 重要: このツールは実際には実行されません。
+ * - needsApproval: true により、フロントエンドでの自動実行を防止
+ * - 実際の処理はバックエンドのサイドバンドで行われます
+ * 
+ * なぜこれが必要か:
+ * - サイドバンドから session.update でツールを注入すると、
+ *   Realtime API がツールを呼び出した際にフロントエンドにも通知が来る
+ * - フロントエンド側にツール定義がないとエラーになる
+ * - needsApproval: true で「承認待ち」状態にして、サイドバンドで処理
+ */
+const askSupervisorTool = tool({
+  name: 'askSupervisor',
+  description: 'Ask the supervisor agent to help with the customer request.',
+  parameters: z.object({
+    request: z.string().describe('The customer request to process'),
+  }),
+  // needsApproval: true により、executeは呼ばれない（承認待ち状態になる）
+  needsApproval: true,
+  execute: async () => {
+    // このコードは実行されない（needsApproval: true のため）
+    // 実際の処理はバックエンドのサイドバンドで行われる
+    console.warn('[Frontend] askSupervisor execute called unexpectedly');
+    return {};
+  },
+});
+
+/**
+ * フロントエンド用のRealtimeAgent設定
+ * 
+ * 重要: 本物のPromptとToolsは バックエンドから session.update で注入されます。
+ * フロントエンドでは最小限の設定と、ダミーの askSupervisor ツールを定義します。
  * 
  * Flow:
- * 1. Realtime API decides to call a tool
- * 2. needsApproval: true causes SDK to wait for approval (execute() not called)
- * 3. Backend (sideband) detects the tool call
- * 4. Backend uses Responses API to execute tool and generate response
- * 5. Backend injects the response via sideband with response.create + instructions
- * 6. Audio plays via WebRTC
- * 7. Frontend never approves the tool (response already provided via sideband)
+ * 1. フロントエンドがRealtimeセッションを開始（ダミー設定 + askSupervisorダミー）
+ * 2. バックエンドがサイドバンド接続
+ * 3. バックエンドが session.update で本物の Instructions + Tools を注入
+ * 4. ユーザーがリクエスト → Realtime APIがaskSupervisorツールを呼び出し
+ * 5. フロントエンドはneedsApproval: trueで承認待ち状態
+ * 6. サイドバンドでツールコールを検出 → バックエンドのトリアージエージェントが処理
+ * 7. 結果をサイドバンドでresponse.createで注入 → 音声出力
  * 
- * needsApproval: true is semantically cleaner than a never-resolving Promise.
+ * この設計のメリット:
+ * - 具体的なTools定義（内部ツール）がフロントエンドに露出しない
+ * - Instructions/Toolsの一元管理（バックエンドのみ）
+ * - バックエンドで動的に設定を変更可能（柔軟性）
  */
-const BACKEND_TOOLS = [
-  tool({
-    name: 'lookupPolicyDocument',
-    description: 'Look up internal documents and policies by topic or keyword. Use this for questions about company policies, return policies, plan details, etc.',
-    parameters: {
-      type: 'object',
-      properties: {
-        topic: {
-          type: 'string',
-          description: 'The topic or keyword to search for.',
-        },
-      },
-      required: ['topic'],
-      additionalProperties: false,
-    },
-    needsApproval: true,
-    execute: async () => {
-      // This won't be called because we never approve
-      console.log('[Frontend] lookupPolicyDocument execute called (unexpected)');
-      return {};
-    },
-  }),
-  tool({
-    name: 'getUserAccountInfo',
-    description: 'Get user account information including billing, plan details, and data usage. Use this for any account-specific questions.',
-    parameters: {
-      type: 'object',
-      properties: {
-        phone_number: {
-          type: 'string',
-          description: "User's phone number. If not provided by user, use 'current' to get current user's info.",
-        },
-      },
-      required: ['phone_number'],
-      additionalProperties: false,
-    },
-    needsApproval: true,
-    execute: async () => {
-      console.log('[Frontend] getUserAccountInfo execute called (unexpected)');
-      return {};
-    },
-  }),
-  tool({
-    name: 'findNearestStore',
-    description: 'Find the nearest store location given a zip code or general location.',
-    parameters: {
-      type: 'object',
-      properties: {
-        zip_code: {
-          type: 'string',
-          description: "Customer's zip code or location. If not provided, use 'nearest'.",
-        },
-      },
-      required: ['zip_code'],
-      additionalProperties: false,
-    },
-    needsApproval: true,
-    execute: async () => {
-      console.log('[Frontend] findNearestStore execute called (unexpected)');
-      return {};
-    },
-  }),
-];
-
 export const chatAgent = new RealtimeAgent({
   name: 'chatAgent',
   voice: 'sage',
+  // ダミー Instructions（サイドバンドから上書きされる）
   instructions: `
-You are a helpful customer service agent for NewTelco.
-
-# How You Should Behave
-1. For GENERAL questions and conversations, respond DIRECTLY and helpfully.
-2. For questions that require SPECIFIC DATA (account info, store locations, policy details), use the appropriate tool.
-
-# Greeting
-- When the user first connects, greet them with: "Hi, you've reached NewTelco, how can I help you?"
-- For subsequent greetings (hi, hello), respond briefly: "Hello!" or "Hi there!"
-
-## Tone
-- Maintain an extremely neutral, unexpressive, and to-the-point tone at all times.
-- Do not use sing-song-y or overly friendly language
-- Be quick and concise
-
-# When to Use Tools
-Use tools ONLY when the user asks for:
-- Account information (billing, plan, data usage) → use getUserAccountInfo
-- Store locations → use findNearestStore  
-- Policy details, return policy, company rules → use lookupPolicyDocument
-
-# When to Answer Directly (NO tools)
-Answer these directly without using tools:
-- General greetings
-- Thank you / Goodbye
-- General questions about what NewTelco offers (you can explain services generally)
-- Questions you can answer from general knowledge
-- Clarifying questions to the user
-
-# Tool Call Behavior
-When you need to use a tool:
-1. Say a brief acknowledgment like "少々お待ちください、お調べいたします。"
-2. Call the appropriate tool
-3. The backend system will process the request and provide the response
-4. You don't need to do anything after calling the tool - the response will be handled automatically
-
-# Example Flow
-- User: "Hi"
-- Assistant: "Hi, you've reached NewTelco, how can I help you?"
-
-- User: "What services do you offer?"
-- Assistant: (Answer directly) "NewTelco provides mobile phone services including voice plans, data plans, and family plans. We also offer international calling packages. Is there something specific you'd like to know about?"
-
-- User: "What's my current bill amount?"
-- Assistant: "少々お待ちください、お調べいたします。" (call getUserAccountInfo tool)
-  → Backend processes and provides the response
-
-- User: "Where is your nearest store?"
-- Assistant: "お調べいたします。" (call findNearestStore tool)
-  → Backend processes and provides the response
-
-- User: "Thank you, goodbye!"
-- Assistant: "ありがとうございました。NewTelcoをご利用いただきありがとうございます。"
-
-Remember: Only use tools when you need specific data. For general conversation and questions, respond directly.
+You are a helpful assistant.
+Please wait for configuration to be loaded from the backend.
 `,
-  tools: BACKEND_TOOLS,
+  // askSupervisorのダミーツール（needsApproval: true）
+  // 実際のツール定義はサイドバンドから session.update で注入される
+  tools: [askSupervisorTool],
 });
 
 export const chatSupervisorScenario = [chatAgent];

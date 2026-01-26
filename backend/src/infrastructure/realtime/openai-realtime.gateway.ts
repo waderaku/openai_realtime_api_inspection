@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OpenAIRealtimeWebSocket } from '@openai/agents/realtime';
 import { RealtimeEvent } from '../../domain/events/realtime-event';
+import { createSessionUpdateConfig } from '../../agents/realtime-config';
 
 type EventCallback = (event: RealtimeEvent) => void;
 
@@ -20,6 +21,11 @@ export class OpenAIRealtimeGateway {
         // SDK uses 'connected' event (not 'open')
         connection.on('connected', () => {
             this.logger.log(`Connected to OpenAI Realtime (call_id=${callId})`);
+
+            // サイドバンド接続後、session.updateで本物のInstructions + Toolsを注入
+            // 注意: この時点ではまだ this.connections.set が実行されていない可能性があるため、
+            // connection 変数を直接使用する
+            this.injectSessionConfigDirect(callId, connection);
         });
 
         // SDK uses '*' wildcard for ALL server events (not 'server_event')
@@ -59,6 +65,28 @@ export class OpenAIRealtimeGateway {
         }
 
         this.connections.set(callId, connection);
+    }
+
+    /**
+     * サイドバンドから session.update で本物の Instructions + Tools を注入
+     * connection を直接受け取るバージョン（connected イベント内で使用）
+     */
+    private injectSessionConfigDirect(callId: string, connection: OpenAIRealtimeWebSocket): boolean {
+        try {
+            const sessionConfig = createSessionUpdateConfig();
+
+            connection.sendEvent({
+                type: 'session.update',
+                session: sessionConfig,
+            });
+
+            this.logger.log(`[Sideband] Injected session config for call_id=${callId}`);
+            this.logger.log(`[Sideband] Tools: ${sessionConfig.tools.map(t => t.name).join(', ')}`);
+            return true;
+        } catch (err) {
+            this.logger.error(`Failed to inject session config for ${callId}: ${err}`);
+            return false;
+        }
     }
 
     /**

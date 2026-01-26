@@ -51,8 +51,7 @@ export class MonitoringService {
                 }
 
                 // Detect Tool Call from Realtime API
-                // When needsApproval is true on frontend, tool execution is paused
-                // We detect the tool call, process with Responses API, and inject via sideband
+                // We're looking for "askSupervisor" tool call specifically
                 if (rawEvent.type === 'conversation.item.done') {
                     const item = rawEvent.item;
 
@@ -72,8 +71,8 @@ export class MonitoringService {
                             userContext: this.recentUserTranscript.get(callId),
                         });
 
-                        // Process the tool call with Responses API and inject result via sideband
-                        this.processToolCallAndInjectResponse(callId);
+                        // Process the tool call with Triage Agent and inject result via sideband
+                        this.processToolCallWithTriageAgent(callId);
                     }
                 }
             });
@@ -94,16 +93,16 @@ export class MonitoringService {
     }
 
     /**
-     * Process a tool call using Responses API and inject the response via sideband.
+     * ツールコールをトリアージエージェントで処理し、結果をサイドバンドで注入
      * 
      * Flow:
-     * 1. Frontend has needsApproval: true, so tool execution is paused
-     * 2. Backend detects the tool call via sideband
-     * 3. Backend uses Responses API to execute tool and generate response
-     * 4. Backend injects the response via sideband
-     * 5. Frontend never approves the tool (response already provided via sideband)
+     * 1. askSupervisorツールコールを検出
+     * 2. リクエスト内容を抽出
+     * 3. トリアージエージェントに渡す
+     * 4. トリアージエージェントが適切なツールを使って処理
+     * 5. 最終回答をサイドバンドで注入
      */
-    private async processToolCallAndInjectResponse(callId: string) {
+    private async processToolCallWithTriageAgent(callId: string) {
         const pendingCall = this.pendingToolCalls.get(callId);
         if (!pendingCall) {
             this.logger.warn(`[Sideband] No pending tool call found for call_id=${callId}`);
@@ -111,28 +110,39 @@ export class MonitoringService {
         }
 
         try {
-            this.logger.log(`[Sideband] Processing: ${pendingCall.functionName}(${pendingCall.arguments})`);
+            this.logger.log(`[Sideband] Processing with Triage Agent: ${pendingCall.functionName}(${pendingCall.arguments})`);
 
-            // Get conversation history for context
+            // askSupervisorツールの引数からリクエストを抽出
+            let userRequest: string;
+            try {
+                const args = JSON.parse(pendingCall.arguments);
+                userRequest = args.request || pendingCall.userContext || 'Please help me with my request.';
+            } catch {
+                userRequest = pendingCall.userContext || 'Please help me with my request.';
+            }
+
+            // 会話履歴を取得
             const session = this.manager.getSession(callId);
             const history = session?.events
                 .filter(e => e.type === 'conversation.item.input_audio_transcription.completed' ||
                     e.type === 'response.output_audio_transcript.done')
                 .slice(-10)
                 .map(e => e.transcript || '')
+                .filter(t => t.length > 0)
                 .join('\n');
 
-            // Process the tool call using Responses API
-            const finalResponse = await this.supervisor.processToolCallFromRealtimeApi(
-                pendingCall.functionName,
-                pendingCall.arguments,
-                pendingCall.userContext,
+            this.logger.log(`[Sideband] User request: ${userRequest}`);
+            this.logger.log(`[Sideband] Conversation history: ${history?.substring(0, 100)}...`);
+
+            // トリアージエージェントで処理
+            const finalResponse = await this.supervisor.processWithTriageAgent(
+                userRequest,
                 history,
             );
 
-            this.logger.log(`[Sideband] Responses API generated: ${finalResponse.substring(0, 100)}...`);
+            this.logger.log(`[Sideband] Triage Agent response: ${finalResponse.substring(0, 100)}...`);
 
-            // Inject the final response via sideband
+            // サイドバンドで回答を注入
             const success = this.gateway.injectResponse(callId, finalResponse);
 
             if (success) {
@@ -141,11 +151,18 @@ export class MonitoringService {
                 this.logger.error(`[Sideband] Failed to inject response for call_id=${callId}`);
             }
 
-            // Clean up
+            // クリーンアップ
             this.pendingToolCalls.delete(callId);
         } catch (error) {
-            this.logger.error(`[Sideband] Error processing tool call: ${error}`);
+            this.logger.error(`[Sideband] Error processing with Triage Agent: ${error}`);
             this.pendingToolCalls.delete(callId);
+
+            // エラー時もユーザーに回答を返す
+            try {
+                this.gateway.injectResponse(callId, 'I apologize, but I encountered an error while processing your request. Please try again.');
+            } catch (injectError) {
+                this.logger.error(`[Sideband] Failed to inject error response: ${injectError}`);
+            }
         }
     }
 
