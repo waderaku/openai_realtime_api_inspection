@@ -1,13 +1,8 @@
-/**
- * Realtime API session.update 用の設定
- * 
- * サイドバンドからセッションに注入するInstructionsとToolsの定義
- * フロントエンドには一切露出しない（完全秘匿）
- */
+import { tool } from '@openai/agents';
 
 /**
  * Realtime API用のInstructions
- * session.updateで注入する本物のプロンプト
+ * サイドバンドのRealtimeAgentに直接設定する本物のプロンプト
  */
 export const REALTIME_INSTRUCTIONS = `
 You are a helpful customer service agent for NewTelco.
@@ -63,15 +58,28 @@ When you need to use a tool:
 Remember: Only use askSupervisor when you need specific data. For general conversation, respond directly.
 `;
 
+const ASK_SUPERVISOR_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    request: {
+      type: 'string' as const,
+      description:
+        "The customer's request or question in natural language. Include all relevant details from the conversation.",
+    },
+  },
+  required: ['request'],
+  additionalProperties: false,
+};
+
 /**
- * Realtime API session.update 用のTools定義
- * フロントエンドには露出しない
+ * RealtimeAgent用の askSupervisor ツール。
+ *
+ * needsApproval: true にして RealtimeSession の自動executeを止め、
+ * 実処理は monitoring.service 側のサイドバンド制御で行う。
  */
-export const REALTIME_TOOLS = [
-    {
-        type: 'function' as const,
-        name: 'askSupervisor',
-        description: `Ask the supervisor agent to help with the customer's request. 
+export const askSupervisorTool = tool({
+  name: 'askSupervisor',
+  description: `Ask the supervisor agent to help with the customer's request.
 Use this tool for ANY request that requires:
 - Looking up account information (billing, plan, data usage)
 - Finding store locations
@@ -79,27 +87,42 @@ Use this tool for ANY request that requires:
 - Any other specific data lookup
 
 The supervisor will determine the best way to help and provide a comprehensive response.`,
-        parameters: {
-            type: 'object',
-            properties: {
-                request: {
-                    type: 'string',
-                    description: "The customer's request or question in natural language. Include all relevant details from the conversation.",
-                },
-            },
-            required: ['request'],
-            additionalProperties: false,
-        },
+  parameters: {
+    type: 'object',
+    properties: {
+      request: {
+        type: 'string',
+        description:
+          "The customer's request or question in natural language. Include all relevant details from the conversation.",
+      },
     },
-];
+    required: ['request'],
+    additionalProperties: false,
+  },
+  needsApproval: true,
+  execute: async (_args: { request: string }) => {
+    // Expected path: never called when needsApproval is true.
+    return { status: 'pending_sideband_processing' };
+  },
+});
 
 /**
- * session.update イベント用のセッション設定を生成
+ * 既存のsession.update経由と互換性を保つための生定義（必要時のみ利用）
  */
+export const REALTIME_TOOLS = [
+  {
+    type: 'function' as const,
+    name: 'askSupervisor',
+    strict: false,
+    description: askSupervisorTool.description,
+    parameters: ASK_SUPERVISOR_SCHEMA,
+  },
+];
+
 export function createSessionUpdateConfig() {
-    return {
-        type: 'realtime',  // Required by Realtime API
-        instructions: REALTIME_INSTRUCTIONS,
-        tools: REALTIME_TOOLS,
-    };
+  return {
+    type: 'realtime' as const,
+    instructions: REALTIME_INSTRUCTIONS,
+    tools: REALTIME_TOOLS,
+  };
 }
