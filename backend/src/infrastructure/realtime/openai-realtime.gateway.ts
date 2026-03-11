@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OpenAIRealtimeWebSocket, RealtimeAgent, RealtimeSession } from '@openai/agents/realtime';
 import { RealtimeEvent } from '../../domain/events/realtime-event';
+import { createModerationGuardrail } from '../../agents/guardrails';
 import { REALTIME_INSTRUCTIONS, askSupervisorTool } from '../../agents/realtime-config';
 
-type EventCallback = (event: RealtimeEvent) => void;
+type EventCallback = (event: RealtimeEvent) => void | Promise<void>;
 
 @Injectable()
 export class OpenAIRealtimeGateway {
@@ -30,30 +31,57 @@ export class OpenAIRealtimeGateway {
             );
         });
 
+        const agent = new RealtimeAgent({
+            name: 'SidebandMonitorAgent',
+            voice: 'sage',
+            instructions: REALTIME_INSTRUCTIONS,
+            tools: [askSupervisorTool],
+        });
+
         const session = new RealtimeSession(
-            new RealtimeAgent({
-                name: 'SidebandMonitorAgent',
-                voice: 'sage',
-                instructions: REALTIME_INSTRUCTIONS,
-                tools: [askSupervisorTool],
-            }),
+            agent,
             {
                 model: 'gpt-realtime',
                 transport,
+                outputGuardrails: [createModerationGuardrail()],
+                outputGuardrailSettings: {
+                    debounceTextLength: -1,
+                },
             },
         );
 
         session.on('transport_event', (event) => {
-            try {
-                onEvent({ ...event, call_id: callId });
-            } catch (err) {
+            void Promise.resolve(onEvent({ ...event, call_id: callId })).catch((err) => {
                 this.logger.error(`Failed to forward event for ${callId}: ${err}`);
-            }
+            });
         });
         session.on('error', (error) => {
             this.logger.error(
                 `Realtime session error (call_id=${callId}): ${JSON.stringify(error)}`,
             );
+        });
+        session.on('guardrail_tripped', (_context, agent, error, details) => {
+            const outputInfo = error.result.output.outputInfo;
+            this.logger.warn(
+                `[Guardrail] Triggered for call_id=${callId} agent=${agent.name} item_id=${details.itemId}`,
+            );
+
+            void Promise.resolve(
+                onEvent({
+                    type: 'guardrail_tripped',
+                    call_id: callId,
+                    agent_name: agent.name,
+                    item_id: details.itemId,
+                    output_info: outputInfo,
+                    policy_hint:
+                        error.result.guardrail.policyHint ??
+                        error.result.guardrail.name,
+                }),
+            ).catch((err) => {
+                this.logger.error(
+                    `Failed to forward guardrail event for ${callId}: ${err}`,
+                );
+            });
         });
 
         try {
@@ -132,6 +160,23 @@ export class OpenAIRealtimeGateway {
 
         const transport = session.transport;
         return transport instanceof OpenAIRealtimeWebSocket ? transport : undefined;
+    }
+
+    interrupt(callId: string): boolean {
+        const session = this.sessions.get(callId);
+        if (!session) {
+            this.logger.warn(`No session found for call_id=${callId}`);
+            return false;
+        }
+
+        try {
+            session.interrupt();
+            this.logger.log(`Interrupted response for call_id=${callId}`);
+            return true;
+        } catch (err) {
+            this.logger.error(`Failed to interrupt response for ${callId}: ${err}`);
+            return false;
+        }
     }
 
     async stop(callId: string) {

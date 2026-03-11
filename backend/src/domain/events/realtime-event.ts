@@ -61,6 +61,7 @@ export class RealtimeEventProcessor {
             'response.audio_transcript.done': this.handleTranscriptDone,
             'response.text.delta': this.handleTextDelta,
             'response.text.done': this.handleTextDone,
+            'guardrail_tripped': this.handleGuardrailTripped,
         };
     }
 
@@ -156,6 +157,15 @@ export class RealtimeEventProcessor {
     private handleTextDone = (event: RealtimeEvent): RealtimeEvent => {
         const text = event.text ?? '';
         this.logger.log(`[監視] テキスト完了: ${text}`);
+        return event;
+    };
+
+    private handleGuardrailTripped = (event: RealtimeEvent): RealtimeEvent => {
+        const category = event.output_info?.moderationCategory ?? 'unknown';
+        const rationale = event.output_info?.moderationRationale ?? '';
+        this.logger.warn(
+            `[監視] Guardrail発火: ${category}${rationale ? ` - ${rationale}` : ''}`,
+        );
         return event;
     };
 

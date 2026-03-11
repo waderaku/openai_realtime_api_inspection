@@ -1,5 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { RealtimeEvent, RealtimeEventProcessor } from '../../domain/events/realtime-event';
+import {
+    RealtimeEvent,
+    RealtimeEventProcessor,
+} from '../../domain/events/realtime-event';
 import { MonitorSessionManager } from '../../domain/monitor/monitor-manager';
 import { OpenAIRealtimeGateway } from '../../infrastructure/realtime/openai-realtime.gateway';
 import { SupervisorService } from '../supervisor/supervisor.service';
@@ -43,10 +46,20 @@ export class MonitoringService {
 
                 // Track user transcription for context
                 if (rawEvent.type === 'conversation.item.input_audio_transcription.completed') {
-                    const transcript = rawEvent.transcript;
+                    const transcript = typeof rawEvent.transcript === 'string'
+                        ? rawEvent.transcript.trim()
+                        : '';
                     if (transcript) {
                         this.logger.log(`[Monitor] User said: ${transcript}`);
                         this.recentUserTranscript.set(callId, transcript);
+                    }
+                }
+
+                if (rawEvent.type === 'conversation.item.created') {
+                    const userText = this.extractUserText(rawEvent);
+                    if (userText) {
+                        this.logger.log(`[Monitor] User text: ${userText}`);
+                        this.recentUserTranscript.set(callId, userText);
                     }
                 }
 
@@ -225,5 +238,24 @@ export class MonitoringService {
 
     getActiveCount() {
         return this.manager.getActiveSessionsCount();
+    }
+
+    private extractUserText(event: RealtimeEvent): string | null {
+        if (event.item?.type !== 'message' || event.item?.role !== 'user') {
+            return null;
+        }
+
+        const content = Array.isArray(event.item?.content)
+            ? (event.item.content as Array<{ type?: string; text?: string }>)
+            : [];
+        const text = content
+            .filter((entry) => entry.type === 'input_text')
+            .map((entry) =>
+                typeof entry.text === 'string' ? entry.text.trim() : '',
+            )
+            .filter((entry) => entry.length > 0)
+            .join('\n');
+
+        return text.length > 0 ? text : null;
     }
 }
